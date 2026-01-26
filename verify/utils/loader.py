@@ -57,15 +57,24 @@ class ReconstructorFactory:
             raise ValueError(f"Unknown layer type: {type_name}")
         return reconstructor_class()
 
-@dataclass
 class VerificationSpec:
-    """Agnostic verification specification for partial NN mappings."""
-    input_bounds: List[Tuple[float, float]]
-    constraints_A: np.ndarray
-    objective_c: np.ndarray
-    b_static: np.ndarray             # The constant 'b' vector from physics
-    input_indices: List[int]         # Which x_full indices are NN inputs
-    output_indices: List[int]        # Which x_full indices are NN outputs
+    def __init__(self, input_bounds, constraints_A, objective_c, b_static, input_indices, output_indices):
+        self.input_bounds = input_bounds  # List of (L, U) tuples
+        self.constraints_A = constraints_A
+        self.objective_c = objective_c
+        self.b_static = b_static
+        self.input_indices = input_indices
+        self.output_indices = output_indices
+
+    @property
+    def input_center(self):
+        """Calculates the center of the input box."""
+        return [(b[1] + b[0]) / 2.0 for b in self.input_bounds]
+
+    @property
+    def input_radius(self):
+        """Calculates the radius (epsilon) of the input box."""
+        return [(b[1] - b[0]) / 2.0 for b in self.input_bounds]
                
                
 class SpecParser(ABC):
@@ -73,20 +82,36 @@ class SpecParser(ABC):
     def parse(self, spec_data: dict) -> Any:
         pass
 
-    def _parse_bounds(self, raw_bounds: list) -> List[Tuple[float, float]]:
-        """Common logic for input bounds."""
-        formatted = []
+    def _parse_bounds(self, raw_bounds):
+        parsed = []
         for b in raw_bounds:
-            if isinstance(b, dict):
-                formatted.append((float(b['min']), float(b['max'])))
-            else:
-                formatted.append((float(b[0]), float(b[1])))
-        return formatted
+            try:
+                # Look for dictionary keys 'min' and 'max'
+                lower = float(b.get('min', b.get('lower', 0.0)))
+                upper = float(b.get('max', b.get('upper', 1.0)))
+                parsed.append((lower, upper))
+            except (AttributeError, TypeError):
+                # Fallback if the YAML structure is actually [0, 5] instead of min/max
+                try:
+                    parsed.append((float(b[0]), float(b[1])))
+                except:
+                    print(f"[-] ERROR: Could not parse bound entry: {b}")
+                    raise
+        return parsed
 
 class LPSpecParser(SpecParser):
     def parse(self, spec_data: dict) -> VerificationSpec:
-        # 1. Parse Bounds
-        bounds = self._parse_bounds(spec_data.get("input_bounds", []))
+        # 1. Parse Bounds: Updated to handle dictionary format {min: X, max: Y}
+        raw_bounds = spec_data.get("input_bounds", [])
+        bounds = []
+        for b in raw_bounds:
+            # Handle dictionary format (min/max) or fallback to list format [0, 5]
+            if isinstance(b, dict):
+                low = b.get('min', b.get('lower', 0.0))
+                high = b.get('max', b.get('upper', 1.0))
+            else:
+                low, high = b[0], b[1]
+            bounds.append((float(low), float(high)))
         
         # 2. Extract Mapping Indices
         mapping = spec_data.get("indices", {})
@@ -95,9 +120,9 @@ class LPSpecParser(SpecParser):
         
         # 3. Extract Physics
         constraints = spec_data.get("constraints", {})
-        A = np.array(constraints.get("A", []))
-        b_static = np.array(constraints.get("b_static", []))
-        c = np.array(spec_data.get("objective_c", []))
+        A = np.array(constraints.get("A", []), dtype=np.float32)
+        b_static = np.array(constraints.get("b_static", []), dtype=np.float32)
+        c = np.array(spec_data.get("objective_c", []), dtype=np.float32)
         
         return VerificationSpec(
             input_bounds=bounds,
@@ -121,6 +146,9 @@ class NNLoader:
         self.meta = config.get('model_meta', {})
         self.layers_data = config.get('layers', [])
         self.spec_raw = config.get('verification_spec', {}) 
+        
+        self.model = self.build_model()
+        self.model.eval()
 
     def get_spec(self):
         """Dispatches parsing based on ptype (lp, robustness, etc.)"""

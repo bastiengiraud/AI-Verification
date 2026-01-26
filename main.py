@@ -48,10 +48,9 @@ def main():
         print(f"[-] ERROR: Failed to parse YAML: {e}")
         sys.exit(1)
 
-    # 4. Agnostic Initialization
     try:
-        # NNLoader handles the architecture (MLP vs CNN) internally
         loader = NNLoader(config_data)
+        engine_type = config_data['model_meta'].get('engine', 'milp').lower()
         
         # Extract routing info from metadata
         p_class = loader.meta.get('pclass')
@@ -62,29 +61,37 @@ def main():
             print("[-] ERROR: 'model_meta' must contain 'pclass' and 'ptype'.")
             return
 
-        # 5. Routing Logic with Safety Nets
-        class_router = USECASE_ROUTER.get(p_class)
-        if not class_router:
-            print(f"[-] ERROR: Unknown problem class '{p_class}'.")
-            print(f"    Available classes: {list(USECASE_ROUTER.keys())}")
-            return
+        # 5. Routing Logic with Engine Selection
+        engine_type = config_data['model_meta'].get('engine', 'milp').lower()
+        
+        if engine_type == "crown":
+            # CROWN is a unified engine, so we use a specific CrownRunner
+            # We import here to keep the startup light if not using CROWN
+            from verify.engines.crown.wrapper import CrownRunner
+            runner = CrownRunner(loader)
+            print(f"[*] Engine selected: CROWN (Formal Bound Propagation)")
+        else:
+            # Default to MILP Router logic
+            class_router = USECASE_ROUTER.get(p_class)
+            if not class_router:
+                print(f"[-] ERROR: Unknown problem class '{p_class}'.")
+                return
 
-        runner = class_router.get(p_type)
-        if not runner:
-            print(f"[-] ERROR: No runner found for type '{p_type}' within class '{p_class}'.")
-            return
+            runner = class_router.get(p_type)
+            if not runner:
+                print(f"[-] ERROR: No MILP runner found for type '{p_type}'.")
+                return
+            print(f"[*] Engine selected: MILP (Exact Solver)")
 
         # 6. Execution
         try:
             print(f"[*] Executing {p_class}/{p_type} for model: {model_name}")
             print(f"{'-'*60}")
             
-            # Capture the results from the runner
-            # Ensure your runner functions (e.g., lp_runner) return a results dict
+            # Both CrownRunner and MILP Runners now follow the same interface
             results = runner(loader)
 
             # 7. Conditional Report Generation
-            # Get the value from config
             report_setting = config_data['model_meta'].get('report', True)
 
             # Logic to handle both string "yes"/"no" and boolean True/False

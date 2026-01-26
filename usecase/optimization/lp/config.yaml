@@ -5,6 +5,7 @@ model_meta:
   architecture: feedforward
   activation: relu
   check: constraint
+  engine: milp
   report: no
 layers:
 - weights:

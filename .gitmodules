@@ -1,3 +1,6 @@
 [submodule "usecase/optimization/acopf"]
 	path = usecase/optimization/acopf
 	url = https://github.com/bastiengiraud/AC-OPF-verification.git
+[submodule "verify/engines/crown/auto_LiRPA"]
+	path = verify/engines/crown/auto_LiRPA
+	url = https://github.com/Verified-Intelligence/auto_LiRPA.git

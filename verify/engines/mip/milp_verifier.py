@@ -445,15 +445,24 @@ import yaml
 import numpy as np
 
 
-@dataclass
 class VerificationSpec:
-    """Agnostic verification specification for partial NN mappings."""
-    input_bounds: List[Tuple[float, float]]
-    constraints_A: np.ndarray
-    objective_c: np.ndarray
-    b_static: np.ndarray             # The constant 'b' vector from physics
-    input_indices: List[int]         # Which x_full indices are NN inputs
-    output_indices: List[int]        # Which x_full indices are NN outputs
+    def __init__(self, input_bounds, constraints_A, objective_c, b_static, input_indices, output_indices):
+        self.input_bounds = input_bounds  # List of (L, U) tuples
+        self.constraints_A = constraints_A
+        self.objective_c = objective_c
+        self.b_static = b_static
+        self.input_indices = input_indices
+        self.output_indices = output_indices
+
+    @property
+    def input_center(self):
+        """Calculates the center of the input box."""
+        return [(b[1] + b[0]) / 2.0 for b in self.input_bounds]
+
+    @property
+    def input_radius(self):
+        """Calculates the radius (epsilon) of the input box."""
+        return [(b[1] - b[0]) / 2.0 for b in self.input_bounds]
 
 class ConfigParser:
     """Parse YAML configuration for NN verification."""
