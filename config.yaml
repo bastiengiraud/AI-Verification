@@ -1,0 +1,33 @@
+model_meta:
+  name: "lp_solver_surrogate"
+  pclass: "optimization"
+  ptype: "lp"
+  architecture: "feedforward"
+  activation: "relu"
+  check: "constraint"
+
+
+
+# The Trained NN parameters
+layers:
+  - name: "layer1"
+    weights: [[0.5, -0.2], [0.1, 0.8]]
+    biases: [0.05, -0.01]
+  - name: "layer2"
+    weights: [[1.0, 1.0]]
+    biases: [0.1]
+
+
+verification_spec:
+  # Input bounds for the 'b' vector (the NN input domain)
+  input_bounds:
+    - [0.5, 1.5]
+    - [0.5, 1.5]
+
+  # Constraints on the NN output: Ax <= b_limit
+  constraints:
+    A: [[1.0, 1.0]]
+    b_limit: [2.0]
+
+  # Optimization target (for distance to optimality check)
+  objective_c: [1.0, 0.0]
