@@ -1,4 +1,4 @@
-# ⚛️ Physics-Informed LP Proxy: Logic & Architecture
+# ⚛️ Neural Network LP Proxy: Logic & Architecture
 
 This repository implements a **Neural Network Surrogate** for Linear Programming (LP) problems. It uses a **Partial Mapping** approach designed for physical systems like Power Grids, where a network learns to predict optimal decision variables while adhering to a static set of physical constraints.
 
