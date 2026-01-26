@@ -1,6 +1,6 @@
 # ⚛️ Neural Network LP Proxy: Logic & Architecture
 
-This repository implements a **Neural Network Surrogate** for Linear Programming (LP) problems. It uses a **Partial Mapping** approach designed for physical systems like Power Grids, where a network learns to predict optimal decision variables while adhering to a static set of physical constraints.
+This repository implements a **Neural Network Surrogate** for Linear Programming (LP) problems. It learns to predict optimal decision variables while adhering to a set of physical constraints.
 
 ---
 
@@ -40,13 +40,13 @@ This forces the Neural Network to learn the "Load Following" logic—it must inc
 
 ## 3. Formal Verification Pipeline
 
-This project goes beyond simple testing by using **Mixed-Integer Linear Programming (MILP)** to formally verify the model's behavior against its physical constraints.
+This project goes beyond simple testing by using **Mixed-Integer Linear Programming (MILP)** to formally verify the model's behavior against its physical constraints. In the configuration file, you can choose whether you would like to check for constraint violations (check = constraint), or the worst-case suboptimality (check = distance).
 
 ### 🛡️ Feasibility Verification
 We search the entire continuous input space to find the "Worst Case" input $x_{in}$ that causes the Neural Network to violate the system constraints ($Ax \le b$).
 
-### 📉 Optimality (Regret) Analysis
-We calculate the **Proven Max Regret**. This uses **KKT (Karush-Kuhn-Tucker) Conditions** to find the maximum possible gap between the cost of the NN's prediction and the true mathematical optimal solution.
+### 📉 Distance to Optimal Analysis
+We calculate the **Proven Worst-Case Sub-Optimality**. This uses **KKT (Karush-Kuhn-Tucker) Conditions** to find the maximum possible gap between the cost of the NN's prediction and the true mathematical optimal solution.
 
 
 
