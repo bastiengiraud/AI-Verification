@@ -589,6 +589,10 @@ class FeasibilityVerificationTask(VerificationTask):
         in_idx = spec.input_indices
         out_idx = spec.output_indices
         
+        model._A_matrix = spec.constraints_A
+        model._b_vector = spec.b_static
+        model._out_idx = spec.output_indices
+        
         output_layer_idx = len(layers) - 1
         num_vars = A.shape[1]  # Total variables in the physics problem
         
@@ -609,22 +613,38 @@ class FeasibilityVerificationTask(VerificationTask):
         model.max_viol = aml.Var(domain=aml.Reals, bounds=(-self.config.bound_u, self.config.bound_u))
         
         # 5. Physics Check: A * x_full <= b_static
-        for j in range(len(A)):
-            row_sum = sum(A[j][i] * model.x_full[i] for i in range(num_vars))
-            # Violation = Actual Value - Limit
-            model.nn_cons.add(model.max_viol >= row_sum - b_static[j])
+        for j in range(len(model._A_matrix)):
+            row_sum = sum(model._A_matrix[j][i] * model.x_full[i] for i in range(num_vars))
+            model.nn_cons.add(model.max_viol >= row_sum - model._b_vector[j])
     
     def _set_objective(self, model, layers, **kwargs):
         model.obj = aml.Objective(expr=model.max_viol, sense=aml.maximize)
     
     def _parse_solution(self, model, layers):
-        spec = model._spec_ref # Pass spec reference during model setup
-        result = VerificationResult({
+        out_layer_idx = len(layers) - 1
+        A = model._A_matrix 
+        b = model._b_vector
+        
+        # Standardize values to float to avoid numpy/pyomo type issues
+        full_x = [float(aml.value(model.x_full[i])) for i in range(len(model.x_full))]
+        
+        # Calculate violations (Ax - b)
+        violations = [float(sum(A[j][i] * full_x[i] for i in range(len(full_x))) - b[j]) for j in range(len(b))]
+        max_violation = float(max(violations))
+
+        # Construct the dictionary with EVERY key the system might look for
+        result = {
             "status": "Success",
-            "max_violation": aml.value(model.obj),
-            "at_input_val": [aml.value(model.inputs[i]) for i in range(len(model.inputs))],
-            "full_x_vector": [aml.value(model.x_full[i]) for i in range(len(model.x_full))]
-        })
+            "max_violation": max_violation,
+            "optimality_gap": max_violation, # Aliasing for compatibility
+            "true_optimal_cost": 0.0,         # Placeholder for constraint checks
+            "violation_per_row": violations,
+            "at_input_val": [float(aml.value(model.inputs[i])) for i in range(len(model.inputs))],
+            "nn_vals": [float(aml.value(model.y[out_layer_idx, i])) for i in range(layers[-1].num_neurons)],
+            "opt_vals": [0.0] * layers[-1].num_neurons,
+            "full_x_vector": full_x  
+        }
+        
         return result
 
 
@@ -637,6 +657,10 @@ class OptimalityGapVerificationTask(VerificationTask):
         in_idx, out_idx = spec.input_indices, spec.output_indices
         m, n = A.shape
         BIG_M = self.config.big_m
+        
+        # Park metadata on the model for later parsing
+        model._objective_c = spec.objective_c
+        model._output_indices = spec.output_indices
         
         # 1. Variables
         model.x_star = aml.Var(range(n), domain=aml.Reals, bounds=(0, 1e4))
@@ -684,17 +708,31 @@ class OptimalityGapVerificationTask(VerificationTask):
         model.obj = aml.Objective(expr=nn_cost - true_cost, sense=aml.maximize)
     
     def _parse_solution(self, model, layers):
-        out_idx = len(layers) - 1
-        result = VerificationResult({
+        out_layer_idx = len(layers) - 1
+        
+        # Retrieve the parked metadata
+        c = model._objective_c
+        out_idx_list = model._output_indices
+
+        # Calculate costs
+        nn_total_cost = sum(c[i] * aml.value(model.x_nn_full[i]) for i in range(len(c)))
+        optimal_total_cost = sum(c[i] * aml.value(model.x_star[i]) for i in range(len(c)))
+
+        # Construct the result dictionary
+        result = {
             "status": "Success",
-            "max_gap": aml.value(model.obj),
             "optimality_gap": aml.value(model.obj),
+            "true_optimal_cost": optimal_total_cost,
+            "nn_total_cost": nn_total_cost,
             "at_input_val": [aml.value(model.inputs[i]) for i in range(len(model.inputs))],
-            "at_output_x": [aml.value(model.y[out_idx, i]) for i in range(layers[-1].num_neurons)],
+            "nn_vals": [aml.value(model.y[out_layer_idx, i]) for i in range(layers[-1].num_neurons)],
+            "opt_vals": [aml.value(model.x_star[i]) for i in out_idx_list],
             "x_star": [aml.value(model.x_star[i]) for i in range(len(model.x_star))],
             "full_x_vector": [aml.value(model.x_nn_full[i]) for i in range(len(model.x_nn_full))]
-        })
-        return result
+        }
+        
+        # Return as the VerificationResult object
+        return VerificationResult(result)
     
 
 

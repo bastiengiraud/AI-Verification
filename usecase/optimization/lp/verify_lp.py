@@ -19,9 +19,6 @@ def run_lp_verification(loader):
     
     # 3. Execution Logic
     if check_type == "constraint":
-        print(f"\n{'='*60}")
-        print(f"VERIFICATION REPORT: AGNOSTIC CONSTRAINT FEASIBILITY")
-        print(f"{'='*60}")
         
         # We pass the full spec so the verifier knows the mapping
         result = verifier.verify_lp_feasibility(
@@ -33,11 +30,10 @@ def run_lp_verification(loader):
             _print_feasibility_report(spec, result)
         else:
             print(f"Solver Error: {result['status']}")
+            
+        return result
 
     elif check_type == "distance":
-        print(f"\n{'='*60}")
-        print(f"VERIFICATION REPORT: SYSTEM OPTIMALITY REGRET")
-        print(f"{'='*60}")
         
         result = verifier.verify_lp_optimality_gap(
             spec=spec, 
@@ -48,6 +44,8 @@ def run_lp_verification(loader):
             _print_optimality_report(spec, result)
         else:
             print(f"Solver Error: {result['status']}")
+            
+        return result
 
 # --- Helper functions to keep the main logic clean ---
 

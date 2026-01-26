@@ -4,7 +4,8 @@ model_meta:
   ptype: lp
   architecture: feedforward
   activation: relu
-  check: distance
+  check: constraint
+  report: no
 layers:
 - weights:
   - - -0.19689548015594482

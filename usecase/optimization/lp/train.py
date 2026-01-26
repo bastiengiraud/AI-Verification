@@ -23,9 +23,9 @@ def export_to_yaml(model, meta, path):
             "ptype": "lp",
             "architecture": "feedforward",
             "activation": "relu",
-            "check": "distance"
+            "check": "distance",
+            "report": "no",
         },
-        "layers": [],
         "verification_spec": {
             "input_bounds": meta["input_bounds"],
             "indices": mapping,
@@ -34,7 +34,9 @@ def export_to_yaml(model, meta, path):
                 "b_static": physics["b"] 
             },
             "objective_c": physics["c"]
-        }
+        },
+        "layers": [],
+        
     }
 
     for module in model:
