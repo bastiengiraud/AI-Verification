@@ -1,136 +1,134 @@
 import torch
 import numpy as np
 from auto_LiRPA import BoundedModule, BoundedTensor, PerturbationLpNorm
+from verify.models.lp_augmented_model import LPAugmentedModel
 
 class CrownRunner:
     def __init__(self, loader):
         self.loader = loader
         self.config = loader.config
-        # Move model to eval mode for bound propagation
-        self.model = loader.model.eval()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = loader.model.to(self.device).eval()
 
     def __call__(self, loader):
-        """
-        Main execution entry point to match the MILP runner interface.
-        """
-        spec = loader.get_spec() # Assuming loader provides constraints A, b
-
-        # 1. Prepare Inputs & Perturbations
-        # CROWN needs a sample input (the center of the box we are checking)
-        input_data = torch.tensor([spec.input_center], dtype=torch.float32)
-        eps = torch.tensor([spec.input_radius], dtype=torch.float32)
+        spec = loader.get_spec()
+        A_phys = torch.tensor(spec.constraints_A, dtype=torch.float32, device=self.device)
+        b_phys = torch.tensor(spec.b_static, dtype=torch.float32, device=self.device)
         
-        # Define the 'epsilon' (bounds) for the inputs
-        # eps is the distance from the center to the bounds
-        ptb = PerturbationLpNorm(norm=np.inf, eps=eps)
-        x = BoundedTensor(input_data, ptb)
-
-        # 2. Wrap the model for auto_LiRPA
-        # 'method' can be 'CROWN', 'IBP', or 'CROWN-IBP'
-        bounded_model = BoundedModule(self.model, input_data)
-    
-        # 3. Compute Bounds
-        # 1. Get NN Bounds (4 outputs)
-        lb, ub = bounded_model.compute_bounds(x=x, method="CROWN") 
+        # 1. Setup Augmented Model
+        augmented_model = LPAugmentedModel(self.model, A_phys, b_phys, spec.input_indices, spec.output_indices)
         
-        # 5. Now multiply by Matrix A (5x6)
-        A = torch.tensor(spec.constraints_A, dtype=torch.float32)
-        b = torch.tensor(spec.b_static, dtype=torch.float32)
+        # 2. Prepare Bounded Inputs (Define x_bounded FIRST)
+        input_center = torch.tensor(spec.input_center, dtype=torch.float32, device=self.device).unsqueeze(0)
+        input_radius = torch.tensor(spec.input_radius, dtype=torch.float32, device=self.device).unsqueeze(0)
         
-        # 2. Identify indices from spec
-        in_idx = spec.input_indices   # e.g., [0, 1, 2, 3, 4, 5]
-        out_idx = spec.output_indices # e.g., [2, 3, 4, 5]
+        ptb = PerturbationLpNorm(norm=np.inf, eps=input_radius)
+        x_bounded = BoundedTensor(input_center, ptb).to(self.device)
+
+        # 3. Initialize BoundedModule with the BoundedTensor
+        bounded_model = BoundedModule(augmented_model, x_bounded, device=self.device)
         
-        # 1. Get the total number of variables from Matrix A (should be 6)
-        A = torch.tensor(spec.constraints_A, dtype=torch.float32)
-        num_total_vars = A.shape[1] 
+        # Now these names will be correctly registered in the graph
+        output_name = bounded_model.output_name[0]
+        input_node_name = bounded_model.input_name[0]
 
-        # 2. Create empty full-size tensors
-        full_lb = torch.zeros(num_total_vars, dtype=torch.float32)
-        full_ub = torch.zeros(num_total_vars, dtype=torch.float32)
-
-        # 3. Fill in the INPUTS (size 2) into the correct slots
-        # spec.input_center usually contains the values for indices [0, 1]
-        input_vals = torch.tensor(spec.input_center, dtype=torch.float32)
-        full_lb[spec.input_indices] = input_vals
-        full_ub[spec.input_indices] = input_vals
-
-        # 4. Fill in the NN OUTPUTS (size 4) into indices [2, 3, 4, 5]
-        # This will NO LONGER crash because full_lb is size 6
-        full_lb[out_idx] = lb.flatten()
-        full_ub[out_idx] = ub.flatten()
+        # 4. Compute Bounds
+        lb_viol, ub_viol, A_dict = bounded_model.compute_bounds(
+            x=(x_bounded,), 
+            method="alpha-CROWN", 
+            return_A=True,
+            needed_A_dict={output_name: [input_node_name]}
+        )
         
-        max_violation = self._calculate_worst_violation(full_lb, full_ub, A, b)
-        
-        
-        # 1. Initialize full_center to the correct TOTAL size (e.g., 6)
-        full_center = torch.zeros(num_total_vars, dtype=torch.float32)
+        # 4. Extract "Worst-Case" Inputs
+        max_violation, worst_row_idx_tensor = torch.max(ub_viol.flatten(), dim=0)
+        worst_row_idx = int(worst_row_idx_tensor.item())
 
-        # 2. Fill inputs (constants)
-        full_center[spec.input_indices] = torch.tensor(spec.input_center, dtype=torch.float32)
+        # Extract slopes
+        uA = A_dict[output_name][input_node_name]['uA']
 
-        # 3. Fill NN outputs (prediction centers)
-        nn_center_vals = (lb + ub) / 2
-        full_center[out_idx] = nn_center_vals.flatten()
+        # WRONG HEURISTIC FOR GETTING WORST-CASE INPUTS! 
+        if uA.shape[0] > 1:
+            # If the first dimension is our constraints (size 5)
+            slopes = uA[worst_row_idx, 0, :]
+        else:
+            # If auto_LiRPA collapsed the constraints or swapped dims
+            # We slice the second dimension instead
+            slopes = uA[0, worst_row_idx, :]
 
-        # 4. Calculate violations for the report
-        # actual_ax is (5x6) @ (6x1) = (5x1)
-        actual_ax = torch.matmul(A, full_center.unsqueeze(1)).flatten()
-        violation_per_row = actual_ax - b.flatten()
-        
-        # --- Standardized Output Printing (Same as MILP) ---
-        print(f"\n{'-'*20} CROWN Summary {'-'*20}")
-        status_str = "FEASIBLE (Safe)" if max_violation <= 1e-6 else "VIOLATED (Unsafe)"
-        print(f"[*] Engine Status: {status_str}")
-        print(f"[*] Max Violation: {max_violation.item():.6f}")
-        
-        # Print first few NN output values for a quick sanity check
-        print(f"[*] NN Outputs (Center): {nn_center_vals.flatten().detach().cpu().numpy()[:5]}")
-        
-        # Find which constraint is the "Worst"
-        worst_idx = torch.argmax(violation_per_row)
-        print(f"[*] Worst Constraint Index: {worst_idx.item()}")
-        print(f"{'-'*55}\n")
-        # --------------------------------------------------
+        # Pick corners based on slope sign
+        in_lb = (input_center - input_radius).flatten()
+        in_ub = (input_center + input_radius).flatten()
+        worst_inputs = torch.where(slopes > 0, in_ub, in_lb)
 
+        # 6. Run specific forward pass for the "Worst-Case" Counter-Example
+        with torch.no_grad():
+            nn_worst_outputs = self.model(worst_inputs.unsqueeze(0)).flatten()
+            nn_nominal_outputs = self.model(input_center).flatten()
 
-        # 5. Return standardized results dictionary
-        return {
+        # 7. Reconstruct Full Vectors for Reporting
+        full_x_nominal = self._reconstruct_full_vector(spec, nn_nominal_outputs, A_phys.shape[1], input_center.flatten())
+        full_x_worst = self._reconstruct_full_vector(spec, nn_worst_outputs, A_phys.shape[1], worst_inputs)
+
+        result = {
             "status": "Success",
-            "max_gap": float(max_violation.detach().cpu()), # Added detach() here
-            "max_violation": float(max_violation.detach().cpu()),
-            "violation_per_row": violation_per_row.detach().cpu().numpy().tolist(),
-            "nn_vals": nn_center_vals.detach().cpu().numpy().flatten().tolist(),
-            "at_input_val": input_data.detach().cpu().numpy().flatten().tolist(),
+            "max_violation": float(max_violation.item()),
+            "violation_per_row": ub_viol.flatten().detach().cpu().numpy().tolist(),
+            "nn_vals": nn_nominal_outputs.tolist(),
+            "full_x_vector": full_x_worst.tolist(), 
+            "at_input_val": worst_inputs.tolist(),   
             "engine": "CROWN"
         }
-
-    def _calculate_worst_violation(self, lb, ub, A, b):
-        """
-        Calculates the maximum possible value of Ax - b given output bounds [lb, ub].
-        lb, ub: shape (1, num_outputs) or (num_outputs,)
-        A: shape (num_constraints, num_outputs)
-        b: shape (num_constraints,)
-        """
-        # Ensure lb and ub are 2D for consistent broadcasting: (1, num_outputs)
-        lb = lb.view(1, -1)
-        ub = ub.view(1, -1)
-
-        # For each constraint (row in A):
-        # If A_ij > 0, the maximum is reached at ub_j
-        # If A_ij < 0, the maximum is reached at lb_j
         
-        # We use torch.clamp to isolate positive and negative parts of A
-        # A_plus contains only positive entries of A, A_minus only negative
-        A_plus = torch.clamp(A, min=0)
-        A_minus = torch.clamp(A, max=0)
+        self._print_feasibility_report(spec, result)
+        return result
 
-        # Max(Ax) = A_plus @ ub + A_minus @ lb
-        # Use .T on bounds to align for matrix multiplication (num_constraints, 1)
-        max_ax = torch.matmul(A_plus, ub.T) + torch.matmul(A_minus, lb.T)
+    def _reconstruct_full_vector(self, spec, nn_out, total_dim, inputs):
+        """Helper to assemble the 6D vector from specific inputs and outputs."""
+        vec = torch.zeros(total_dim, device=self.device)
+        vec[spec.input_indices] = inputs
+        vec[spec.output_indices] = nn_out
+        return vec
+    
 
-        # Subtract b (ensure b is reshaped to match max_ax)
-        violation_per_row = max_ax.flatten() - b.flatten()
+    def _print_feasibility_report(self, spec, result):
+        """Standardized breakdown of constraints and variable contributions."""
+        x_full = np.array(result['full_x_vector'])
+        A = spec.constraints_A
+        b = spec.b_static
+        in_idx = spec.input_indices
+        out_idx = spec.output_indices
+        
+        print(f"\n[!] CROWN ENGINE REPORT: Max Violation found: {result['max_violation']:.6f}, NOTE THIS IS A RELAXED UPPER BOUND")
+        print("The below analysis is not fully correct yet.")
+        print(f"{'='*80}")
+        print(f"{'COMPONENT ANALYSIS':<20} | {'INDICES':<15} | {'VALUES'}")
+        print(f"{'-'*80}")
+        print(f"{'NN Inputs (Fixed)':<20} | {str(in_idx):<15} | {[round(x_full[i], 4) for i in in_idx]}")
+        print(f"{'NN Outputs (Pred)':<20} | {str(out_idx):<15} | {[round(x_full[i], 4) for i in out_idx]}")
+        
+        # Identify auxiliary variables
+        all_indices = set(range(len(x_full)))
+        aux_idx = sorted(list(all_indices - set(in_idx) - set(out_idx)))
+        if aux_idx:
+            print(f"{'Aux Variables':<20} | {str(aux_idx):<15} | {[round(x_full[i], 4) for i in aux_idx]}")
+        
+        print(f"\n{'CONSTRAINT CHECK':<80}")
+        print(f"{'-'*80}")
+        print(f"{'Row':<5} | {'LHS (Σ A_ij * x_j)':<20} | {'RHS (b)':<12} | {'Violation':<12}")
+        print(f"{'-'*80}")
 
-        # The worst violation is the maximum across all constraints
-        return torch.max(violation_per_row)
+        for i in range(len(A)):
+            lhs_val = np.dot(A[i], x_full)
+            violation = lhs_val - b[i]
+            status = "[FAILED]" if violation > 1e-5 else "[OK]"
+            
+            print(f"{i:<5} | {lhs_val:<20.6f} | {b[i]:<12.6f} | {violation:<12.6f} {status}")
+            
+            if violation > 1e-5:
+                # Contribution analysis
+                contributions = [(j, A[i][j] * x_full[j]) for j in range(len(x_full)) if abs(A[i][j] * x_full[j]) > 1e-4]
+                contrib_str = " + ".join([f"({val:.2f} [x{j}])" for j, val in contributions])
+                print(f"      └─ Calculation: {contrib_str} = {lhs_val:.4f}")
+
+        print(f"{'='*80}\n")

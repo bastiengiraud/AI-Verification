@@ -49,6 +49,7 @@ The behavior of the toolbox is governed by the `model_meta` section in your `con
 | `check` | `"constraint"` | **Verification Mode:** <br>• `constraint`: Searches for safety violations (worst-case $Ax > b$). <br>• `distance`: Measures the optimality gap against the ground-truth. |
 | `report` | `"yes"` | **Reporting Toggle:** Accepts `yes`/`no` or `true`/`false`. If enabled, a Jupyter Notebook is automatically generated in the `output/` directory. |
 | `architecture` | `"feedforward"`| **Model Type:** Informs the `NNLoader` how to parse the weights (e.g., `feedforward` for MLPs or `cnn` for convolutional nets). |
+| `engine` | `"milp"`| **Verification Engine:** Selects the solver. `milp` is complete (provides exact worst-case results) but slow. `crown` is incomplete (provides a fast formal upper bound) and may include a relaxation gap. |
 | `activation` | `"relu"` | **Activation Function:** Specifies the non-linearity. This is vital for MILP-based verification, which requires specific encodings for `relu` vs `sigmoid`. |
 
 ---
