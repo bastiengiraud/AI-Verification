@@ -651,7 +651,9 @@ class FeasibilityVerificationTask(VerificationTask):
             "at_input_val": [float(aml.value(model.inputs[i])) for i in range(len(model.inputs))],
             "nn_vals": [float(aml.value(model.y[out_layer_idx, i])) for i in range(layers[-1].num_neurons)],
             "opt_vals": [0.0] * layers[-1].num_neurons,
-            "full_x_vector": full_x  
+            "full_x_vector": full_x,
+            "constraints_A": A,        
+            "b_static": b,             
         }
         
         return result

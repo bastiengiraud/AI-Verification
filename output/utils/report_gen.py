@@ -1,6 +1,7 @@
 import nbformat as nbf
 import os
 from datetime import datetime
+import numpy as np
 
 def generate_report(results, config, output_path="output/"):
     """
@@ -11,7 +12,7 @@ def generate_report(results, config, output_path="output/"):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     # --- 1. Header Section ---
-    title = "# 🛡️ Regret Analysis Report" if check_type == "distance" else "# ⚠️ Constraint Violation Report"
+    title = "# 🛡️ Sub-Optimality Analysis Report" if check_type == "distance" else "# ⚠️ Constraint Violation Report"
     nb['cells'].append(nbf.v4.new_markdown_cell(f"{title}\n**Generated on:** {timestamp}"))
     nb['cells'].append(nbf.v4.new_markdown_cell(
         f"## ⚙️ System Configuration\n"
@@ -28,8 +29,9 @@ def generate_report(results, config, output_path="output/"):
             "| Metric | Value |\n"
             "| :--- | :--- |\n"
             f"| **Status** | {'✅ PASSED' if gap < 1e-4 else '❌ FAILED'} |\n"
-            f"| **Max Regret (Gap)** | {gap:.6f} |\n"
+            f"| **NN Optimal Cost** | {results.get('nn_total_cost', 0.0):.6f} |\n"
             f"| **True Optimal Cost** | {results.get('true_optimal_cost', 0.0):.6f} |\n"
+            f"| **Max Sub-Optimality (Gap)** | {gap:.6f} |\n"
         )
     else:
         max_viol = results.get('max_violation', 0.0)
@@ -40,6 +42,21 @@ def generate_report(results, config, output_path="output/"):
             f"| **Status** | {'✅ FEASIBLE' if max_viol < 1e-4 else '❌ VIOLATED'} |\n"
             f"| **Worst Violation** | {max_viol:.6f} |\n"
         )
+        
+        A = np.array(results.get('constraints_A', []))
+        b = np.array(results.get('b_static', []))
+        x_full = np.array(results.get('full_x_vector', []))
+        
+        # Add the Constraint Table
+        summary_md += "#### 📏 Detailed Constraint Analysis\n"
+        summary_md += "| Row | Status | LHS Value | Limit (b) | Violation |\n"
+        summary_md += "| :--- | :--- | :--- | :--- | :--- |\n"
+        
+        for i in range(len(A)):
+            lhs_val = np.dot(A[i], x_full)
+            viol = lhs_val - b[i]
+            status_icon = "❌" if viol > 1e-5 else "✅"
+            summary_md += f"| {i} | {status_icon} | {lhs_val:.4f} | {b[i]:.4f} | {viol:.4f} |\n"
     
     nb['cells'].append(nbf.v4.new_markdown_cell(summary_md))
 
