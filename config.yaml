@@ -1,33 +1,67 @@
 model_meta:
-  name: "lp_solver_surrogate"
-  pclass: "optimization"
-  ptype: "lp"
-  architecture: "feedforward"
-  activation: "relu"
-  check: "constraint"
-
-
-
-# The Trained NN parameters
-layers:
-  - name: "layer1"
-    weights: [[0.5, -0.2], [0.1, 0.8]]
-    biases: [0.05, -0.01]
-  - name: "layer2"
-    weights: [[1.0, 1.0]]
-    biases: [0.1]
+  name: lp_proxy
+  pclass: optimization
+  ptype: lp
+  architecture: feedforward
+  activation: relu
+  check: constraint
+  engine: crown
+  report: no
 
 
 verification_spec:
-  # Input bounds for the 'b' vector (the NN input domain)
   input_bounds:
-    - [0.5, 1.5]
-    - [0.5, 1.5]
-
-  # Constraints on the NN output: Ax <= b_limit
+  - min: 0
+    max: 5
+  - min: 0
+    max: 5
+  indices:
+    input_indices:
+    - 0
+    - 1
+    output_indices:
+    - 2
+    - 3
   constraints:
-    A: [[1.0, 1.0]]
-    b_limit: [2.0]
+    A:
+    - - -0.4168082379831586
+      - 0.10701540134806642
+    - - 0.38158208067245725
+      - 0.8124296454659361
+    - - -0.3416653763580384
+      - 0.3180480198026645
+    - - -0.931118400928518
+      - -0.5395042318409635
+    - - 1.0
+      - 1.0
+    b_static:
+    - 7.9843584587919025
+    - 9.482164196472976
+  objective_c:
+  - 0.994923988199265
+  - 0.2662999449958718
 
-  # Optimization target (for distance to optimality check)
-  objective_c: [1.0, 0.0]
+
+layers:
+- weights:
+  - - -0.19689548015594482
+    - -0.2703263461589813
+  - - 0.5977350473403931
+    - 0.007955772802233696
+  biases:
+  - -0.4999750852584839
+  - -0.6702486872673035
+  - 0.5254024267196655
+  - 0.21062254905700684
+- weights:
+  - - -0.19689548015594482
+    - -0.2703263461589813
+  - - 0.5977350473403931
+    - 0.007955772802233696
+  biases:
+  - -0.4999750852584839
+  - -0.6702486872673035
+  - 0.5254024267196655
+  - 0.21062254905700684
+
+
