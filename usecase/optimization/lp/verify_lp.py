@@ -104,9 +104,13 @@ def _print_feasibility_report(spec, result, cons_names):
             print(f"[*] CROWN has formally proven that no violation > {max_viol:.6f} exists.")
             print("    Note that CROWN gives is based on relaxations, and the result is conservative.")
         else:
-            print("\n[!] WARNING: Counter-example generation is work-in-progress for CROWN.")
-            print("    The tables below are suppressed for CROWN when a violation is found.")
-            print("    Note that CROWN gives is based on relaxations, and the result is conservative.")
+            attained = result.get('attained_violation', float('nan'))
+            print(f"[*] CROWN bound: no violation > {max_viol:.6f}. PGD counter-example attains {attained:.6f} "
+                  f"at input {np.round(result['at_input_val'], 4).tolist()}.")
+            if attained > 1e-7:
+                print("    The attained violation is real: the system is NOT safe.")
+            else:
+                print("    No real violation found yet: the bound may be loose (CROWN is conservative); use MILP.")
         print(f"{'='*80}\n")
         return
     

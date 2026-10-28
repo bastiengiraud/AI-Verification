@@ -17,12 +17,25 @@ class VerifierConfig:
     big_m: float = 1e6
     bound_u: float = 1000.0
     solver_name: str = 'glpk'
-    solver_options: Dict[str, Any] = field(
-        default_factory=lambda: {'OutputFlag': 0, 'LogToConsole': 0}
-    )
+    # None picks quiet defaults for Gurobi and no options for other solvers (Gurobi flags break e.g. GLPK/HiGHS)
+    solver_options: Optional[Dict[str, Any]] = None
     use_obbt: bool = True
+    # Tighten with the LP relaxation instead of the full MILP: still sound, much faster, slightly looser bounds
+    obbt_relaxed: bool = False
     verbose: bool = False
     numerical_tolerance: float = 1e-6
+
+    def solver_options_for_solver(self) -> Dict[str, Any]:
+        if self.solver_options is not None:
+            return self.solver_options
+        return {'OutputFlag': 0, 'LogToConsole': 0} if 'gurobi' in self.solver_name.lower() else {}
+
+
+def _affine_expr(weights, prev_vars, bias):
+    """w @ prev_vars + bias as one linear expression, skipping zero weights."""
+    weights = np.asarray(weights, dtype=float)
+    nonzero = np.flatnonzero(weights)
+    return aml.quicksum(float(weights[i]) * prev_vars[i] for i in nonzero) + float(bias)
 
 
 @dataclass
@@ -172,19 +185,13 @@ class IntervalArithmeticComputer(BoundComputer):
         return all_bounds
     
     def _compute_layer_bounds(self, W, B, prev_bounds, is_last=False):
-        bounds = []
-        for n_idx in range(len(B)):
-            low_sum, high_sum = B[n_idx], B[n_idx]
-            for i, w_val in enumerate(W[n_idx]):
-                l_prev, h_prev = prev_bounds[i]
-                if w_val > 0:
-                    low_sum += w_val * l_prev
-                    high_sum += w_val * h_prev
-                else:
-                    low_sum += w_val * h_prev
-                    high_sum += w_val * l_prev
-            bounds.append((low_sum, high_sum))
-        return bounds
+        # Vectorized: split W into its positive and negative parts instead of looping over every weight
+        W = np.asarray(W, dtype=float)
+        prev = np.asarray(prev_bounds, dtype=float)
+        W_pos, W_neg = np.clip(W, 0, None), np.clip(W, None, 0)
+        low = W_pos @ prev[:, 0] + W_neg @ prev[:, 1] + B
+        high = W_pos @ prev[:, 1] + W_neg @ prev[:, 0] + B
+        return list(zip(low.tolist(), high.tolist()))
 
 
 class OBBTComputer(BoundComputer):
@@ -200,85 +207,56 @@ class OBBTComputer(BoundComputer):
             print("Starting OBBT...")
         
         ia_computer = IntervalArithmeticComputer()
-        ia_bounds = ia_computer.compute_bounds(layers, input_bounds, config)
-        
+
         refined_bounds = []
         for l_idx, layer in enumerate(layers):
-            layer_refined = []
-            if config.verbose:
-                print(f"  Tightening Layer {l_idx}...")
-            
-            for n_idx in range(layer.num_neurons):
-                ia_l, ia_u = ia_bounds[l_idx][n_idx]
-                
-                # Only optimize unstable neurons
-                if ia_l < -config.numerical_tolerance < ia_u:
-                    tight_l, tight_u = self._optimize_neuron(
-                        layers, l_idx, n_idx, input_bounds, 
-                        refined_bounds, ia_bounds, config
-                    )
-                    layer_refined.append((tight_l, tight_u))
-                else:
-                    layer_refined.append((ia_l, ia_u))
-            
-            refined_bounds.append(layer_refined)
-        
-        return refined_bounds
-    
-    def _optimize_neuron(self, layers, l_idx, n_idx, input_bounds,
-                        refined_bounds, ia_bounds, config):
-        """Optimize bounds for a single neuron."""
-        # Build model up to current layer with hybrid bounds:
-        # - Use refined bounds for previous layers (already computed)
-        # - Use IA bounds for current layer (being computed)
-        hybrid_bounds = refined_bounds + [ia_bounds[l_idx]]
-        
-        # Build partial model (only up to current layer)
-        model = self.base_model_builder.build(
-            layers[:l_idx+1], 
-            input_bounds, 
-            hybrid_bounds,  # Pass hybrid bounds
-            config
-        )
-        
-        # Build target expression for the neuron we're optimizing
-        layer = layers[l_idx]
-        if l_idx == 0:
-            prev_vars = [model.inputs[i] for i in range(len(input_bounds))]
-        else:
-            prev_vars = [model.y[l_idx-1, i] for i in range(layers[l_idx-1].num_neurons)]
-        
-        target_expr = sum(
-            layer.weights[n_idx][i] * prev_vars[i] 
-            for i in range(len(prev_vars))
-        ) + layer.biases[n_idx]
-        
-        # Minimize
-        model.obj = aml.Objective(expr=target_expr, sense=aml.minimize)
-        solver = SolverFactory(config.solver_name)
-        result = solver.solve(model, tee=config.verbose, 
-            options=config.solver_options)
-        
-        if result.solver.termination_condition != TerminationCondition.optimal:
-            # Fallback to IA bounds if optimization fails
-            return ia_bounds[l_idx][n_idx]
-        
-        tight_l = aml.value(model.obj)
-        
-        # Maximize (reuse model, just change objective)
-        model.del_component(model.obj)
-        model.obj = aml.Objective(expr=target_expr, sense=aml.maximize)
-        result = solver.solve(model, tee=config.verbose, 
-            options=config.solver_options)
-        
-        if result.solver.termination_condition != TerminationCondition.optimal:
-            # Fallback to IA bounds if optimization fails
-            return ia_bounds[l_idx][n_idx]
-        
-        tight_u = aml.value(model.obj)
+            # IA from the already tightened previous layer, so later layers profit from the tightening
+            prev_bounds = input_bounds if l_idx == 0 else [(max(0, l), max(0, u)) for l, u in refined_bounds[-1]]
+            ia_layer = ia_computer._compute_layer_bounds(layer.weights, layer.biases, prev_bounds)
 
-        
-        return tight_l, tight_u
+            # IA is exact for the first affine layer over an input box, so there is nothing to tighten there
+            unstable = [n for n, (l, u) in enumerate(ia_layer) if l < -config.numerical_tolerance < u]
+            if l_idx == 0 or not unstable:
+                refined_bounds.append(ia_layer)
+                continue
+
+            if config.verbose:
+                print(f"  Tightening Layer {l_idx} ({len(unstable)} unstable neurons)...")
+
+            # The partial model is identical for every neuron of this layer: build it once, only swap the objective
+            model = self.base_model_builder.build(layers[:l_idx+1], input_bounds, refined_bounds + [ia_layer], config)
+            if config.obbt_relaxed:
+                aml.TransformationFactory('core.relax_integer_vars').apply_to(model)
+            solver = SolverFactory(config.solver_name)
+
+            layer_refined = list(ia_layer)
+            for n_idx in unstable:
+                layer_refined[n_idx] = self._optimize_neuron(model, solver, layers, l_idx, n_idx, ia_layer[n_idx], config)
+            refined_bounds.append(layer_refined)
+
+        return refined_bounds
+
+    def _optimize_neuron(self, model, solver, layers, l_idx, n_idx, ia_bound, config):
+        """Optimize bounds for a single neuron on the shared partial model of its layer."""
+        layer = layers[l_idx]
+        prev_vars = [model.y[l_idx-1, i] for i in range(layers[l_idx-1].num_neurons)]
+        target_expr = _affine_expr(layer.weights[n_idx], prev_vars, layer.biases[n_idx])
+
+        tight = list(ia_bound)
+        for k, sense in enumerate((aml.minimize, aml.maximize)):
+            if hasattr(model, 'obj'):
+                model.del_component(model.obj)
+            model.obj = aml.Objective(expr=target_expr, sense=sense)
+            result = solver.solve(model, tee=config.verbose, options=config.solver_options_for_solver())
+            if result.solver.termination_condition != TerminationCondition.optimal:
+                continue  # Fallback to the IA bound if optimization fails
+            # Use the solver's proven bound, not the incumbent: with a MIP gap the incumbent is not a valid bound
+            bound = result.problem.lower_bound if sense == aml.minimize else result.problem.upper_bound
+            if bound is None or not np.isfinite(bound):
+                continue  # No proven bound reported: keep IA (the incumbent is no bound once a MIP gap is allowed)
+            tight[k] = max(tight[k], bound) if k == 0 else min(tight[k], bound)
+        model.del_component(model.obj)
+        return tuple(tight)
 
 
 class PyomoModelBuilder:
@@ -345,11 +323,8 @@ class PyomoModelBuilder:
             
             # Encode each neuron
             for n_idx in range(layer.num_neurons):
-                lin_expr = sum(
-                    layer.weights[n_idx][i] * prev_layer_vars[i] 
-                    for i in range(len(prev_layer_vars))
-                ) + layer.biases[n_idx]
-                
+                lin_expr = _affine_expr(layer.weights[n_idx], prev_layer_vars, layer.biases[n_idx])
+
                 bounds = precomputed_bounds[l_idx][n_idx]
                 neuron_stats = encoder.encode(
                     model, l_idx, n_idx, lin_expr, bounds, config
@@ -399,6 +374,8 @@ class VerificationTask(ABC):
         # Step 2: Build base model
         model = self.model_builder.build(layers, input_bounds, bounds, self.config)
         model._spec_ref = kwargs.get('spec')
+        model._input_bounds = input_bounds
+        model._layer_bounds = bounds
         
         # Step 3: Add task-specific constraints (hook method)
         self._add_task_constraints(model, layers, **kwargs)
@@ -430,13 +407,17 @@ class VerificationTask(ABC):
     def _solve_and_parse(self, model, layers):
         """Solve model and parse results."""
         opt = SolverFactory(self.config.solver_name)
-        results = opt.solve(model, tee=self.config.verbose, 
-                          options=self.config.solver_options)
+        results = opt.solve(model, tee=self.config.verbose,
+                          options=self.config.solver_options_for_solver())
 
         if results.solver.termination_condition != TerminationCondition.optimal:
             return {"status": str(results.solver.termination_condition)}
-        
-        return self._parse_solution(model, layers)
+
+        result = self._parse_solution(model, layers)
+        # With a MIP gap the incumbent can understate a maximum: also report the solver's proven bound
+        bound = results.problem.upper_bound if model.obj.sense == aml.maximize else results.problem.lower_bound
+        result["objective_bound"] = float(bound) if bound is not None else float("nan")
+        return result
     
     @abstractmethod
     def _parse_solution(self, model, layers) -> Dict[str, Any]:
@@ -612,7 +593,9 @@ class FeasibilityVerificationTask(VerificationTask):
         
         # 2. Create the "Global x" variables (x_full)
         # This vector represents the full state of the physical system
-        model.x_full = aml.Var(range(num_vars), domain=aml.Reals, bounds=(-1e6, 1e6))
+        # Columns that are neither NN input nor output are free within +-bound_u; the big-M below relies on these same
+        # bounds, so they must stay in sync
+        model.x_full = aml.Var(range(num_vars), domain=aml.Reals, bounds=(-self.config.bound_u, self.config.bound_u))
         
         # 3. LINKING STEP: Stitch the NN into the Global x vector
         # Link Input Variables: x_full[in_idx] == model.inputs
@@ -623,13 +606,27 @@ class FeasibilityVerificationTask(VerificationTask):
         for i, global_idx in enumerate(out_idx):
             model.nn_cons.add(model.x_full[global_idx] == model.y[output_layer_idx, i])
 
-        # 4. Max violation variable
-        model.max_viol = aml.Var(domain=aml.Reals, bounds=(-self.config.bound_u, self.config.bound_u))
-        
-        # 5. Physics Check: A * x_full <= b_static
-        for j in range(len(model._A_matrix)):
-            row_sum = sum(model._A_matrix[j][i] * model.x_full[i] for i in range(num_vars))
-            model.nn_cons.add(model.max_viol >= row_sum - model._b_vector[j])
+        # 4. Interval bounds of every row residual (A x_full - b), from the input box and the output layer bounds.
+        #    They give each row its own tight big-M below.
+        x_lo = np.full(num_vars, -self.config.bound_u)
+        x_hi = np.full(num_vars, self.config.bound_u)
+        x_lo[in_idx] = [b[0] for b in model._input_bounds]
+        x_hi[in_idx] = [b[1] for b in model._input_bounds]
+        x_lo[out_idx] = [b[0] for b in model._layer_bounds[output_layer_idx]]
+        x_hi[out_idx] = [b[1] for b in model._layer_bounds[output_layer_idx]]
+        A_pos, A_neg = np.clip(A, 0, None), np.clip(A, None, 0)
+        row_lo = A_pos @ x_lo + A_neg @ x_hi - b_static
+        row_hi = A_pos @ x_hi + A_neg @ x_lo - b_static
+        big_m = float(row_hi.max())
+
+        # 5. Max violation = max_j (A_j x_full - b_j). Maximizing a variable that is only bounded *below* by every
+        #    row is unbounded (it used to run to bound_u at an arbitrary x), so a binary picks the row it may reach.
+        model.max_viol = aml.Var(domain=aml.Reals, bounds=(float(row_lo.min()), big_m))
+        model.row_select = aml.Var(range(len(A)), domain=aml.Binary)
+        model.nn_cons.add(sum(model.row_select[j] for j in range(len(A))) == 1)
+        for j in range(len(A)):
+            row_sum = _affine_expr(A[j], model.x_full, -b_static[j])
+            model.nn_cons.add(model.max_viol <= row_sum + (big_m - row_lo[j]) * (1 - model.row_select[j]))
     
     def _set_objective(self, model, layers, **kwargs):
         model.obj = aml.Objective(expr=model.max_viol, sense=aml.maximize)

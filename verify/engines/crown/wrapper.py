@@ -2,6 +2,7 @@ import torch
 import numpy as np
 from auto_LiRPA import BoundedModule, BoundedTensor, PerturbationLpNorm
 from verify.models.lp_augmented_model import LPAugmentedModel
+from verify.engines.crown.spec_bounds import pgd_minimize
 
 class CrownRunner:
     def __init__(self, loader):
@@ -41,29 +42,23 @@ class CrownRunner:
             needed_A_dict={output_name: [input_node_name]}
         )
         
-        # 4. Extract "Worst-Case" Inputs
+        # 4. Certified bound: no input in the box violates any row by more than max_violation
         max_violation, worst_row_idx_tensor = torch.max(ub_viol.flatten(), dim=0)
         worst_row_idx = int(worst_row_idx_tensor.item())
 
-        # Extract slopes
-        uA = A_dict[output_name][input_node_name]['uA']
-
-        # WRONG HEURISTIC FOR GETTING WORST-CASE INPUTS! 
-        if uA.shape[0] > 1:
-            # If the first dimension is our constraints (size 5)
-            slopes = uA[worst_row_idx, 0, :]
-        else:
-            # If auto_LiRPA collapsed the constraints or swapped dims
-            # We slice the second dimension instead
-            slopes = uA[0, worst_row_idx, :]
-
-        # Pick corners based on slope sign
+        # 5. Counter-example candidate. The box corner maximizing the row's linear *upper bound* (uA has shape
+        #    (batch, n_rows, n_in)) is only a heuristic start: refine it with PGD on the true network and report the
+        #    violation it actually attains, which is a real lower bound of the worst case.
+        slopes = A_dict[output_name][input_node_name]['uA'][0, worst_row_idx].flatten()
         in_lb = (input_center - input_radius).flatten()
         in_ub = (input_center + input_radius).flatten()
-        worst_inputs = torch.where(slopes > 0, in_ub, in_lb)
+        corner = torch.where(slopes > 0, in_ub, in_lb).unsqueeze(0)
+        worst_inputs = pgd_minimize(augmented_model, lambda r: -r.max(dim=1).values,
+                                    in_lb.unsqueeze(0), in_ub.unsqueeze(0), corner, 50, 0.1, None).flatten()
 
         # 6. Run specific forward pass for the "Worst-Case" Counter-Example
         with torch.no_grad():
+            attained_violation = float(augmented_model(worst_inputs.unsqueeze(0)).max().item())
             nn_worst_outputs = self.model(worst_inputs.unsqueeze(0)).flatten()
             nn_nominal_outputs = self.model(input_center).flatten()
 
@@ -74,7 +69,9 @@ class CrownRunner:
         # Keep them as numpy arrays for the internal reporter
         result = {
             "status": "Success",
-            "max_violation": float(max_violation.item()),
+            "max_violation": float(max_violation.item()),  # certified upper bound of the worst violation
+            "attained_violation": attained_violation,       # violation reached at at_input_val (a real point)
+            "worst_row_idx": worst_row_idx,
             "violation_per_row": ub_viol.flatten().detach().cpu().numpy(), # Array
             "nn_vals": nn_nominal_outputs.detach().cpu().numpy(),           # Array
             "full_x_vector": full_x_worst.detach().cpu().numpy(),         # Array

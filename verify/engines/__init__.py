@@ -1,6 +1,10 @@
 # nn_verify/engines/__init__.py
-from .mip import MILPVerifier
-# When you implement CROWN later, you'll add: 
-# from .crown import CrownVerifier
-
 __all__ = ["MILPVerifier"]
+
+
+def __getattr__(name):
+    # Lazy, so the CROWN engine can be imported without pyomo installed
+    if name == "MILPVerifier":
+        from .mip import MILPVerifier
+        return MILPVerifier
+    raise AttributeError(name)

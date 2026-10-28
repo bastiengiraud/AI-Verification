@@ -113,7 +113,7 @@ def main():
         print(f"[-] ROUTING/CONFIG ERROR: {e}")
     except Exception as e:
         print(f"[-] CRITICAL SYSTEM FAILURE: {e}")
-        # import traceback; traceback.print_exc()
+        import traceback; traceback.print_exc()
 
 if __name__ == "__main__":
     main()

@@ -110,4 +110,3 @@ dependencies:
       - traitlets==5.14.3
       - typing==3.7.4.3
       - typing-extensions==4.15.0
-prefix: C:\Users\bagir\miniconda3\envs\verif_aie
